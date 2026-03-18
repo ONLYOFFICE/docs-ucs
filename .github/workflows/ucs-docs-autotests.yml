@@ -147,21 +147,21 @@ jobs:
              chmod 600 /root/ucs_admin.pwd; \
              timeout $APP_OPERATION_TIMEOUT univention-app install nextcloud --noninteractive --username Administrator --pwdfile /root/ucs_admin.pwd"
 
-      # - name: Enable test appcenter
-      #   if: ${{ matrix.scenario == 'clean-install' }}
-      #   env:
-      #     HOST: ${{ steps.wait.outputs.ip }}
-      #     USERNAME: root
-      #     PASSWORD: ${{ secrets.DROPLET_PASSWORD }}
-      #   run: |
-      #     set -euo pipefail
+      - name: Enable test appcenter
+        if: ${{ matrix.scenario == 'clean-install' }}
+        env:
+          HOST: ${{ steps.wait.outputs.ip }}
+          USERNAME: root
+          PASSWORD: ${{ secrets.DROPLET_PASSWORD }}
+        run: |
+          set -euo pipefail
 
-      #     sshpass -p "$PASSWORD" ssh \
-      #       $SSH_OPTS \
-      #       "$USERNAME@$HOST" \
-      #       "set -euo pipefail; \
-      #        univention-app dev-use-test-appcenter; \
-      #        sleep $TEST_APPCENTER_WARMUP_SECONDS"
+          sshpass -p "$PASSWORD" ssh \
+            $SSH_OPTS \
+            "$USERNAME@$HOST" \
+            "set -euo pipefail; \
+             univention-app dev-use-test-appcenter; \
+             sleep $TEST_APPCENTER_WARMUP_SECONDS"
 
       - name: Install ONLYOFFICE Docs
         env:
