@@ -1,0 +1,281 @@
+name: ONLYOFFICE Docs Univention Integration Autotests
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  integration-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        scenario:
+          - clean-install
+          - update
+
+    env:
+      DO_API: https://api.digitalocean.com/v2
+      SSH_OPTS: -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10
+      DO_STATUS_RETRIES: 60
+      SSH_RETRIES: 30
+      WEB_RETRIES: 60
+      RETRY_DELAY_SECONDS: 10
+      UCS_WARMUP_SECONDS: 120
+      TEST_APPCENTER_WARMUP_SECONDS: 180
+      APP_OPERATION_TIMEOUT: 3600
+
+    steps:
+      # Repository and tool preparation
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Install tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq sshpass
+
+      # Droplet provisioning
+      - name: Create droplet from snapshot
+        id: create
+        env:
+          DO_TOKEN: ${{ secrets.DO_TOKEN }}
+          SNAPSHOT_ID: ${{ secrets.DO_SNAPSHOT_ID }}
+          DO_SSH_KEY_ID: ${{ secrets.DO_SSH_KEY_ID }}
+          DROPLET_NAME: ${{ vars.DO_DROPLET_NAME }}
+          REGION: ${{ vars.DO_REGION }}
+          SIZE: ${{ vars.DO_SIZE }}
+        run: |
+          set -euo pipefail
+
+          RESPONSE=$(curl -sS -X POST "$DO_API/droplets" \
+            -H "Authorization: Bearer $DO_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"name\": \"${DROPLET_NAME}\",
+              \"region\": \"${REGION}\",
+              \"size\": \"${SIZE}\",
+              \"image\": \"${SNAPSHOT_ID}\",
+              \"ipv6\": false,
+              \"monitoring\": false,
+              \"ssh_keys\": [${DO_SSH_KEY_ID}]
+            }")
+
+          echo "$RESPONSE"
+
+          DROPLET_ID=$(echo "$RESPONSE" | jq -r '.droplet.id // empty')
+          if [ -z "$DROPLET_ID" ]; then
+            echo "Failed to create droplet"
+            echo "$RESPONSE" | jq .
+            exit 1
+          fi
+
+          echo "droplet_id=$DROPLET_ID" >> "$GITHUB_OUTPUT"
+
+      - name: Wait for droplet to become active and get IP
+        id: wait
+        env:
+          DO_TOKEN: ${{ secrets.DO_TOKEN }}
+          DROPLET_ID: ${{ steps.create.outputs.droplet_id }}
+        run: |
+          set -euo pipefail
+
+          for i in $(seq 1 "$DO_STATUS_RETRIES"); do
+            RESPONSE=$(curl -sS \
+              -H "Authorization: Bearer $DO_TOKEN" \
+              "$DO_API/droplets/${DROPLET_ID}")
+
+            STATUS=$(echo "$RESPONSE" | jq -r '.droplet.status // empty')
+            IP=$(echo "$RESPONSE" | jq -r '.droplet.networks.v4[]? | select(.type=="public") | .ip_address' | head -n1)
+
+            echo "Attempt $i: status=${STATUS:-unknown} ip=${IP:-none}"
+
+            if [ "$STATUS" = "active" ] && [ -n "${IP:-}" ]; then
+              echo "ip=$IP" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+
+            sleep "$RETRY_DELAY_SECONDS"
+          done
+
+          echo "Droplet did not become active in time"
+          exit 1
+
+      # Remote host readiness and app installation
+      - name: Wait for SSH
+        env:
+          HOST: ${{ steps.wait.outputs.ip }}
+          USERNAME: root
+          PASSWORD: ${{ secrets.DROPLET_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          for i in $(seq 1 "$SSH_RETRIES"); do
+            if sshpass -p "$PASSWORD" ssh \
+              $SSH_OPTS \
+              "$USERNAME@$HOST" "echo SSH OK"; then
+              exit 0
+            fi
+
+            echo "SSH not ready yet, retry $i"
+            sleep "$RETRY_DELAY_SECONDS"
+          done
+
+          echo "SSH did not become available"
+          exit 1
+
+      - name: Wait for UCS DNS and services
+        run: |
+          sleep "$UCS_WARMUP_SECONDS"
+
+      - name: Install Nextcloud
+        env:
+          HOST: ${{ steps.wait.outputs.ip }}
+          USERNAME: root
+          PASSWORD: ${{ secrets.DROPLET_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          sshpass -p "$PASSWORD" ssh \
+            $SSH_OPTS \
+            "$USERNAME@$HOST" \
+             "set -euo pipefail; \
+             printf '%s' '$PASSWORD' > /root/ucs_admin.pwd; \
+             chmod 600 /root/ucs_admin.pwd; \
+             timeout $APP_OPERATION_TIMEOUT univention-app install nextcloud --noninteractive --username Administrator --pwdfile /root/ucs_admin.pwd"
+
+      # - name: Enable test appcenter
+      #   if: ${{ matrix.scenario == 'clean-install' }}
+      #   env:
+      #     HOST: ${{ steps.wait.outputs.ip }}
+      #     USERNAME: root
+      #     PASSWORD: ${{ secrets.DROPLET_PASSWORD }}
+      #   run: |
+      #     set -euo pipefail
+
+      #     sshpass -p "$PASSWORD" ssh \
+      #       $SSH_OPTS \
+      #       "$USERNAME@$HOST" \
+      #       "set -euo pipefail; \
+      #        univention-app dev-use-test-appcenter; \
+      #        sleep $TEST_APPCENTER_WARMUP_SECONDS"
+
+      - name: Install ONLYOFFICE Docs
+        env:
+          HOST: ${{ steps.wait.outputs.ip }}
+          USERNAME: root
+          PASSWORD: ${{ secrets.DROPLET_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          sshpass -p "$PASSWORD" ssh \
+            $SSH_OPTS \
+            "$USERNAME@$HOST" \
+             "set -euo pipefail; \
+             printf '%s' '$PASSWORD' > /root/ucs_admin.pwd; \
+             chmod 600 /root/ucs_admin.pwd; \
+             timeout $APP_OPERATION_TIMEOUT univention-app install onlyoffice-ds --noninteractive --username Administrator --pwdfile /root/ucs_admin.pwd"
+
+      - name: Enable test appcenter and update ONLYOFFICE Docs
+        if: ${{ matrix.scenario == 'update' }}
+        env:
+          HOST: ${{ steps.wait.outputs.ip }}
+          USERNAME: root
+          PASSWORD: ${{ secrets.DROPLET_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          sshpass -p "$PASSWORD" ssh \
+            $SSH_OPTS \
+             "$USERNAME@$HOST" \
+             "set -euo pipefail; \
+              univention-app dev-use-test-appcenter; \
+              sleep $TEST_APPCENTER_WARMUP_SECONDS; \
+              printf '%s' '$PASSWORD' > /root/ucs_admin.pwd; \
+              chmod 600 /root/ucs_admin.pwd; \
+              timeout $APP_OPERATION_TIMEOUT univention-app upgrade onlyoffice-ds --noninteractive --username Administrator --pwdfile /root/ucs_admin.pwd"
+
+      # Application readiness check
+      - name: Wait for web app to be ready
+        env:
+          HOST: ${{ steps.wait.outputs.ip }}
+        run: |
+          set -euo pipefail
+
+          for i in $(seq 1 "$WEB_RETRIES"); do
+            if curl -k -I --max-time 10 "https://$HOST" >/dev/null 2>&1; then
+              echo "Web app is reachable"
+              exit 0
+            fi
+            echo "Web app is not ready yet, retry $i"
+            sleep "$RETRY_DELAY_SECONDS"
+          done
+
+          echo "Web app did not become ready in time"
+          exit 1
+
+      # Playwright tests and artifacts
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: tests/package-lock.json
+
+      - name: Install npm dependencies
+        working-directory: tests
+        run: npm ci
+
+      - name: Install Playwright and browser dependencies
+        working-directory: tests
+        run: npx playwright install --with-deps chromium
+
+      - name: Run Playwright integration test
+        env:
+          TEST_HOST: ${{ steps.wait.outputs.ip }}
+          DROPLET_PASSWORD: ${{ secrets.DROPLET_PASSWORD }}
+        working-directory: tests
+        run: |
+          npm run test:e2e
+
+      - name: Upload Playwright report
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: playwright-artifacts-${{ matrix.scenario }}
+          path: |
+            tests/playwright-report
+            tests/test-results
+          if-no-files-found: ignore
+
+      # Infrastructure cleanup
+      - name: Cleanup droplet
+        if: always()
+        env:
+          DO_TOKEN: ${{ secrets.DO_TOKEN }}
+          DROPLET_ID: ${{ steps.create.outputs.droplet_id }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${DROPLET_ID:-}" ]; then
+            echo "Droplet ID is empty; skipping cleanup"
+            exit 0
+          fi
+
+          RESPONSE=$(curl -sS -X DELETE \
+            -H "Authorization: Bearer $DO_TOKEN" \
+            "$DO_API/droplets/${DROPLET_ID}" \
+            -w "\n%{http_code}")
+
+          HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+          if [ "$HTTP_CODE" = "204" ] || [ "$HTTP_CODE" = "404" ]; then
+            echo "Cleanup completed with HTTP $HTTP_CODE"
+            exit 0
+          fi
+
+          echo "Unexpected cleanup response:"
+          echo "$RESPONSE"
+          exit 1
