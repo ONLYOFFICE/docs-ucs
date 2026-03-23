@@ -116,7 +116,7 @@ async function login(page: Page): Promise<void> {
     page.getByRole('button', { name: 'Log in', exact: true }).click(),
   ]);
 
-  await page.waitForTimeout(CLICK_DELAY);
+  await page.waitForTimeout(CLICK_DELAY * 2);
   const closeButton = page.getByRole('button', { name: 'Close' });
 
   if (await closeButton.isVisible().catch(() => false)) {

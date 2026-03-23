@@ -2,17 +2,24 @@ name: ONLYOFFICE Docs Univention Integration Autotests
 
 on:
   workflow_dispatch:
+  workflow_run:
+    workflows: ["Publish apps"]
+    types: [completed]
 
 permissions:
   contents: read
 
 jobs:
   integration-tests:
+    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 180
     strategy:
       fail-fast: false
       matrix:
+        app:
+          - onlyoffice-ds
+          - onlyoffice-ds-integration
         scenario:
           - clean-install
           - update
@@ -168,6 +175,7 @@ jobs:
           HOST: ${{ steps.wait.outputs.ip }}
           USERNAME: root
           PASSWORD: ${{ secrets.DROPLET_PASSWORD }}
+          APP_NAME: ${{ matrix.app }}
         run: |
           set -euo pipefail
 
@@ -177,7 +185,7 @@ jobs:
              "set -euo pipefail; \
              printf '%s' '$PASSWORD' > /root/ucs_admin.pwd; \
              chmod 600 /root/ucs_admin.pwd; \
-             timeout $APP_OPERATION_TIMEOUT univention-app install onlyoffice-ds --noninteractive --username Administrator --pwdfile /root/ucs_admin.pwd"
+             timeout $APP_OPERATION_TIMEOUT univention-app install $APP_NAME --noninteractive --username Administrator --pwdfile /root/ucs_admin.pwd"
 
       - name: Enable test appcenter and update ONLYOFFICE Docs
         if: ${{ matrix.scenario == 'update' }}
@@ -185,6 +193,7 @@ jobs:
           HOST: ${{ steps.wait.outputs.ip }}
           USERNAME: root
           PASSWORD: ${{ secrets.DROPLET_PASSWORD }}
+          APP_NAME: ${{ matrix.app }}
         run: |
           set -euo pipefail
 
@@ -196,7 +205,7 @@ jobs:
               sleep $TEST_APPCENTER_WARMUP_SECONDS; \
               printf '%s' '$PASSWORD' > /root/ucs_admin.pwd; \
               chmod 600 /root/ucs_admin.pwd; \
-              timeout $APP_OPERATION_TIMEOUT univention-app upgrade onlyoffice-ds --noninteractive --username Administrator --pwdfile /root/ucs_admin.pwd"
+              timeout $APP_OPERATION_TIMEOUT univention-app upgrade $APP_NAME --noninteractive --username Administrator --pwdfile /root/ucs_admin.pwd"
 
       # Application readiness check
       - name: Wait for web app to be ready
@@ -245,7 +254,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v6
         with:
-          name: playwright-artifacts-${{ matrix.scenario }}
+          name: playwright-artifacts-${{ matrix.app }}-${{ matrix.scenario }}
           path: |
             tests/playwright-report
             tests/test-results
