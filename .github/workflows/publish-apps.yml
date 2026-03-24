@@ -1,24 +1,58 @@
-name: Publish apps
+name: Publish apps 
 run-name: Version ${{ github.ref_name }}
 
 on:
-  workflow_dispatch: 
   push:
     tags:
-      - '*'
-
+       - '*'
+    
 jobs:
   check-apps:
     runs-on: ubuntu-latest
     outputs:
-      apps: '[]'
+      apps: ${{ steps.set-matrix.outputs.apps }}
     steps:
-      - name: Skip check
-        run: echo "Skipping app check"
+      - name: Checkout Repository
+        uses: actions/checkout@v2
 
+      - name: Check Apps
+        id: set-matrix
+        run: |
+          apps=$(find apps -mindepth 1 -maxdepth 1 -type d -exec basename {} \;)
+          if [ -z "$apps" ]; then
+            echo "No applications found in the 'apps' directory!"
+            exit 1
+          fi
+          apps_json=$(printf '%s\n' $apps | jq -R . | jq -s . | tr -d '[:space:]')
+          echo "Detected applications: $apps_json"
+          echo "apps=$apps_json" >> $GITHUB_OUTPUT
+ 
   publish-applications:
     needs: check-apps
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        app_dir: ${{ fromJson(needs.check-apps.outputs.apps) }}
     steps:
-      - name: Skip publish
-        run: echo "Skipping publish"
+      - name: Checkout Repository
+        uses: actions/checkout@v2
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      
+      - name: Set version
+        run: echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_ENV
+      
+      - name: Publish App
+        env:
+          username: ${{ secrets.PORTAL_USER }}
+          passfile: ${{ runner.temp }}/pwdfile
+          version: ${{ env.version }}
+        run: |
+          echo "${{ secrets.PORTAL_PWD }}" > $passfile
+          cd ./apps/${{ matrix.app_dir }}
+          ../../deploy.sh
+          cd -
+          
