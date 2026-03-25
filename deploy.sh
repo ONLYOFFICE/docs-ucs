@@ -16,7 +16,7 @@ if [ -z "$app_ini" ]; then
     echo -e "No ini files found. Nothing to publish"
     exit 1
 fi
-
+#привет
 sed -i "s|appversion|$app_ver|" "$app_ini"
 sed -i "s|imageversion|$app_ver|" "$app_ini"
 
